@@ -26,7 +26,7 @@ class MESHBAKER_OT_bake(bpy.types.Operator):
         s = context.scene.mesh_baker
 
         if not any((s.use_normal, s.use_ws_normal, s.use_ao, s.use_thickness,
-                    s.use_curvature, s.use_position, s.use_matid)):
+                    s.use_curvature, s.use_position, s.use_matid, s.use_height)):
             self.report({'ERROR'}, "No maps enabled")
             return {'CANCELLED'}
         if s.save_to_disk and s.out_dir.startswith("//") and not bpy.data.filepath:

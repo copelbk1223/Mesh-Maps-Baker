@@ -89,6 +89,27 @@ def blur_masked(img, mask, iterations=1):
     return out
 
 
+def masked_gradient(img, mask, axis):
+    """Central/one-sided differences that never cross the mask boundary,
+    so UV islands can't contaminate each other (Substance's seam handling)."""
+    if axis == 1:
+        nxt, nm = _shift2d(img, 0, 1), _shift2d(mask.astype(np.float32), 0, 1) > 0
+        prv, pm = _shift2d(img, 0, -1), _shift2d(mask.astype(np.float32), 0, -1) > 0
+    else:
+        nxt, nm = _shift2d(img, 1, 0), _shift2d(mask.astype(np.float32), 1, 0) > 0
+        prv, pm = _shift2d(img, -1, 0), _shift2d(mask.astype(np.float32), -1, 0) > 0
+    f = nxt - img
+    b = img - prv
+    g = np.zeros_like(img)
+    both = nm & pm & mask
+    of = nm & ~pm & mask
+    ob = pm & ~nm & mask
+    g[both] = 0.5 * (f + b)[both]
+    g[of] = f[of]
+    g[ob] = b[ob]
+    return g
+
+
 def downsample(img, mask, ss):
     """Mask-weighted box downsample by integer factor ss (supersampling resolve)."""
     if ss == 1:
@@ -120,13 +141,51 @@ def curvature_from_normal(nrm_ts, mask, intensity, smooth_iters, invert, res):
     n = nrm_ts
     if smooth_iters > 0:
         n = blur_masked(n.copy(), mask, smooth_iters)
-    # d(nx)/du + d(ny)/dv ; axis 1 = u (x), axis 0 = v (y)
-    gx = np.gradient(n[..., 0], axis=1)
-    gy = np.gradient(n[..., 1], axis=0)
+    # d(nx)/du + d(ny)/dv ; axis 1 = u (x), axis 0 = v (y); seam-aware
+    gx = masked_gradient(n[..., 0:1], mask, axis=1)[..., 0]
+    gy = masked_gradient(n[..., 1:2], mask, axis=0)[..., 0]
     div = (gx + gy) * (res / 1024.0) * 8.0 * intensity
     if invert:
         div = -div
     out = np.clip(0.5 + div * 0.5, 0.0, 1.0).astype(np.float32)
+    return out[..., None].repeat(3, axis=-1)
+
+
+def curvature_from_geometry(nrm_ws, pos, mask, intensity, smooth_iters,
+                            invert, diag, auto_tonemap=True):
+    """Curvature from the mesh itself (Substance's 'from mesh' baker):
+    mean curvature estimated from how the world-space normal rotates per
+    unit of world-space distance across the surface. Works in single-object
+    mode where the tangent normal map is flat by definition.
+    nrm_ws: (H, W, 3) world normals; pos: (H, W, 3) world positions."""
+    n = nrm_ws
+    if smooth_iters > 0:
+        n = blur_masked(n.copy(), mask, smooth_iters)
+    dNu = masked_gradient(n, mask, axis=1)
+    dNv = masked_gradient(n, mask, axis=0)
+    dPu = masked_gradient(pos, mask, axis=1)
+    dPv = masked_gradient(pos, mask, axis=0)
+    lu = (dPu * dPu).sum(-1)
+    lv = (dPv * dPv).sum(-1)
+    floor = (1e-6 * diag) ** 2
+    ku = np.where(lu > floor, (dNu * dPu).sum(-1) / np.maximum(lu, floor), 0.0)
+    kv = np.where(lv > floor, (dNv * dPv).sum(-1) / np.maximum(lv, floor), 0.0)
+    # reject discontinuities: a normal changing by more than ~45 degrees
+    # between adjacent texels is a UV rim/seam, not surface curvature
+    flip = (np.linalg.norm(dNu, axis=-1) > 0.76) |            (np.linalg.norm(dNv, axis=-1) > 0.76)
+    curv = np.where(flip, 0.0, (ku + kv) * 0.5 * diag)
+    if auto_tonemap:
+        vals = np.abs(curv[mask])
+        if len(vals):
+            ref = np.percentile(vals, 99.0)
+            if ref > 1e-12:
+                curv = curv * (0.45 / ref)
+    else:
+        curv = curv * 0.02
+    curv = curv * intensity
+    if invert:
+        curv = -curv
+    out = np.clip(0.5 + curv, 0.0, 1.0).astype(np.float32)
     return out[..., None].repeat(3, axis=-1)
 
 

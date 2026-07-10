@@ -18,7 +18,8 @@ import numpy as np
 from . import engine_native
 from .engine_python import PyScene
 from .maps import (
-    BakeError, curvature_from_normal, dilate, downsample, gather_hit_attrs,
+    BakeError, curvature_from_geometry, curvature_from_normal, dilate,
+    downsample, gather_hit_attrs,
     id_color, normalize_rows, upsample2,
 )
 from .mesh_data import GBuffer, merge_high, object_arrays, rasterize_into
@@ -134,8 +135,14 @@ def run_bake(context, results):
     }
     for frac in rasterize_into(gbuf, L["tri_uv"], attrs):
         yield 0.01 + 0.10 * frac, "Rasterizing UVs"
+    if gbuf.skipped:
+        results["warnings"].append(
+            f"{gbuf.skipped} triangle(s) have corrupt UVs (inf/NaN) and were "
+            "skipped — re-unwrap the affected faces to fix")
     if not gbuf.mask.any():
-        raise BakeError("No texels covered — check that the UV map is inside 0..1")
+        raise BakeError(
+            "No texels covered — the UV map is empty, corrupt, or entirely "
+            "outside the 0..1 tile. Re-unwrap the low poly and try again")
 
     yx = np.nonzero(gbuf.mask)
     n = len(yx[0])
@@ -219,6 +226,7 @@ def run_bake(context, results):
 
         chunk = PROJ_CHUNK_NATIVE if is_native else PROJ_CHUNK_PY
         hit_tri = np.empty(n, np.int32)
+        hit_t = np.empty(n, np.float32)
         hit_u = np.empty(n, np.float32)
         hit_v = np.empty(n, np.float32)
         hit_pos = np.empty((n, 3), np.float32)
@@ -228,10 +236,19 @@ def run_bake(context, results):
             cl = cage_len[st:en] if len(cage_len) else cage_len
             r = scene.project(origins[st:en], dirs[st:en], frontal, rear,
                               mode, cl, tm, allow, eps)
-            hit_tri[st:en], _, hit_u[st:en], hit_v[st:en], hit_pos[st:en] = r
+            (hit_tri[st:en], hit_t[st:en], hit_u[st:en],
+             hit_v[st:en], hit_pos[st:en]) = r
             yield 0.22 + 0.18 * (en / n), f"Projecting rays  {en}/{n}"
 
         found = hit_tri >= 0
+        if s.proj_ignore_backface:
+            st_ = np.clip(hit_tri, 0, None)
+            tv = H["verts"][H["tri_v"][st_]]
+            ng = np.cross(tv[:, 1] - tv[:, 0], tv[:, 2] - tv[:, 0])
+            ray_dir = dirs if mode == 1 else dirs * np.where(
+                hit_t >= 0, 1.0, -1.0)[:, None]
+            backface = (ray_dir * ng).sum(-1) > 0
+            found = found & ~backface
         miss = int(n - found.sum())
         if miss:
             results["warnings"].append(
@@ -247,6 +264,7 @@ def run_bake(context, results):
         hit_pos, hit_nrm = pos, nrm
         hit_mat = low_mat
         hit_mesh = np.zeros(n, np.int32)
+        hit_t = np.zeros(n, np.float32)
         valid = np.ones(n, bool)
         yield 0.35, "Using surface data"
 
@@ -254,7 +272,9 @@ def run_bake(context, results):
     vmask2d[yx[0][valid], yx[1][valid]] = True
 
     # ------------------------------------------------------------- 4. maps
-    need_nts = s.use_normal or s.use_curvature
+    need_nts = s.use_normal or (
+        s.use_curvature and (s.curv_source == 'NORMALMAP'
+                             or (s.curv_source == 'AUTO' and h2l)))
     nts_img = None
     if need_nts:
         yield 0.42, "Computing normal map"
@@ -281,8 +301,21 @@ def run_bake(context, results):
 
     if s.use_curvature:
         yield 0.48, "Computing curvature"
-        curv = curvature_from_normal(nts_img, vmask2d, s.curv_intensity,
-                                     s.curv_smooth, s.curv_invert, R)
+        cmode = s.curv_source
+        if cmode == 'AUTO':
+            cmode = 'NORMALMAP' if h2l else 'MESH'
+        if cmode == 'NORMALMAP' and nts_img is not None:
+            curv = curvature_from_normal(nts_img, vmask2d, s.curv_intensity,
+                                         s.curv_smooth, s.curv_invert, R)
+        else:
+            nws_img = _scatter(R, yx, np.where(valid[:, None], hit_nrm, 0))
+            pos_img = _scatter(R, yx, hit_pos)
+            nws_img, _ = dilate(nws_img, vmask2d.copy(), 4)
+            pos_img, _ = dilate(pos_img, vmask2d.copy(), 4)
+            curv = curvature_from_geometry(nws_img, pos_img, vmask2d,
+                                           s.curv_intensity, s.curv_smooth,
+                                           s.curv_invert, diag,
+                                           s.curv_auto_tonemap)
         out = _resolve(curv, vmask2d, ss, s.dilation)
         _save_map(results, s, "Curvature", out, res, 'Non-Color')
 
@@ -293,11 +326,37 @@ def run_bake(context, results):
         yield 0.50, "Saved world space normal"
 
     if s.use_position:
-        p01 = (hit_pos - bb_min) / np.maximum(bb_max - bb_min, 1e-12)
+        if s.pos_normalization == 'BSPHERE':
+            center = (bb_min + bb_max) * 0.5
+            radius = max(float(np.linalg.norm(bb_max - center)), 1e-12)
+            p01 = (hit_pos - center) / (2.0 * radius) + 0.5
+        else:
+            p01 = (hit_pos - bb_min) / np.maximum(bb_max - bb_min, 1e-12)
+        if s.pos_mode != 'ALL':
+            ax = {'X': 0, 'Y': 1, 'Z': 2}[s.pos_mode]
+            p01 = p01[:, ax:ax + 1].repeat(3, axis=1)
         img = _scatter(R, yx, np.clip(p01, 0, 1))
         out = _resolve(img, vmask2d, ss, s.dilation)
-        _save_map(results, s, "Position", out, res, 'Non-Color', force_exr=True)
+        _save_map(results, s, "Position", out, res, 'Non-Color')
         yield 0.52, "Saved position map"
+
+    if s.use_height:
+        if not h2l:
+            results["warnings"].append(
+                "Height map needs High to Low mode (it measures the distance "
+                "between the two surfaces) — skipped")
+        else:
+            if s.height_scale_pct > 0:
+                ref = s.height_scale_pct / 100.0 * diag
+            else:
+                hv = np.abs(hit_t[valid])
+                ref = float(np.percentile(hv, 99.0)) if len(hv) else 1.0
+            ref = max(ref, 1e-12)
+            hh = np.clip(0.5 + hit_t / (2.0 * ref), 0.0, 1.0)
+            img = _scatter(R, yx, np.where(valid, hh, 0.5)[:, None].repeat(3, 1))
+            out = _resolve(img, vmask2d, ss, s.dilation)
+            _save_map(results, s, "Height", out, res, 'Non-Color')
+            yield 0.53, "Saved height map"
 
     if s.use_matid:
         table = np.stack([id_color(nm) for nm in id_names]) if id_names else \

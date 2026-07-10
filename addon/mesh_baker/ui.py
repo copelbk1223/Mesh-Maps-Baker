@@ -28,6 +28,7 @@ class MESHBAKER_PT_panel(bpy.types.Panel):
                 box.prop(s, "high_collection", text="")
             box.prop(s, "cage_object")
             box.prop(s, "match_by_name")
+            box.prop(s, "proj_ignore_backface")
             col = box.column(align=True)
             col.prop(s, "frontal_pct")
             col.prop(s, "rear_pct")
@@ -54,7 +55,9 @@ class MESHBAKER_PT_panel(bpy.types.Panel):
         col.prop(s, "use_curvature")
         if s.use_curvature:
             sub = col.column(align=True)
+            sub.prop(s, "curv_source")
             sub.prop(s, "curv_intensity")
+            sub.prop(s, "curv_auto_tonemap")
             sub.prop(s, "curv_smooth")
             sub.prop(s, "curv_invert")
         col.separator()
@@ -67,6 +70,14 @@ class MESHBAKER_PT_panel(bpy.types.Panel):
         col.separator()
         col.prop(s, "use_ws_normal")
         col.prop(s, "use_position")
+        if s.use_position:
+            sub = col.column(align=True)
+            sub.prop(s, "pos_mode")
+            sub.prop(s, "pos_normalization")
+        if s.mode == 'H2L':
+            col.prop(s, "use_height")
+            if s.use_height:
+                col.prop(s, "height_scale_pct")
         col.prop(s, "use_matid")
         if s.use_matid:
             col.prop(s, "id_source")

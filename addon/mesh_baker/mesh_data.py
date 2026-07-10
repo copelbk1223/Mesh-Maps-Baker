@@ -11,12 +11,15 @@ def object_arrays(obj, depsgraph, need_tangents, mat_name_offset=0, mesh_id=0):
     ob = obj.evaluated_get(depsgraph)
     me = ob.to_mesh()
     try:
-        uv_layer = me.uv_layers.active
         if need_tangents:
-            if uv_layer is None:
+            if me.uv_layers.active is None:
                 raise BakeError(f"'{obj.name}' has no UV map")
             me.calc_tangents()  # MikkTSpace, same standard as Substance/Marmoset
         me.calc_loop_triangles()
+        # IMPORTANT: fetch the UV layer only AFTER calc_tangents/calc_loop_triangles.
+        # Those calls reallocate the mesh's custom data, so any uv_layer
+        # reference taken before them dangles and reads garbage (inf/NaN).
+        uv_layer = me.uv_layers.active
 
         nv = len(me.vertices)
         nl = len(me.loops)
@@ -123,6 +126,7 @@ class GBuffer:
         self.tan = np.zeros((res, res, 3), np.float32)
         self.bs = np.ones((res, res), np.float32)
         self.mat = np.zeros((res, res), np.int32)
+        self.skipped = 0
 
 
 def rasterize_into(gbuf, tri_uv, attrs, chunk=4096):
@@ -131,18 +135,32 @@ def rasterize_into(gbuf, tri_uv, attrs, chunk=4096):
     Generator yielding progress 0..1."""
     res = gbuf.res
     T = len(tri_uv)
-    uvpx = tri_uv * res - 0.5
+    # float64: huge/garbage UVs overflow float32 into inf
+    uvpx = tri_uv.astype(np.float64) * res - 0.5
+    finite = np.isfinite(uvpx).all(axis=(1, 2))
+    n_skipped = int(T - finite.sum())
+    gbuf.skipped = n_skipped
+    if n_skipped:
+        print(f"mesh_baker: skipping {n_skipped} triangle(s) with "
+              "non-finite UV coordinates")
     eps = 1e-6
 
     for start in range(0, T, chunk):
         for i in range(start, min(start + chunk, T)):
+            if not finite[i]:
+                continue
             a, b, c = uvpx[i]
-            minx = int(np.floor(min(a[0], b[0], c[0])))
-            maxx = int(np.ceil(max(a[0], b[0], c[0])))
-            miny = int(np.floor(min(a[1], b[1], c[1])))
-            maxy = int(np.ceil(max(a[1], b[1], c[1])))
-            minx = max(minx, 0); miny = max(miny, 0)
-            maxx = min(maxx, res - 1); maxy = min(maxy, res - 1)
+            fminx = min(a[0], b[0], c[0])
+            fmaxx = max(a[0], b[0], c[0])
+            fminy = min(a[1], b[1], c[1])
+            fmaxy = max(a[1], b[1], c[1])
+            # entirely outside the 0..1 tile (or absurd coords): skip
+            if fmaxx < 0 or fminx > res - 1 or fmaxy < 0 or fminy > res - 1:
+                continue
+            minx = int(np.floor(max(fminx, 0.0)))
+            miny = int(np.floor(max(fminy, 0.0)))
+            maxx = int(np.ceil(min(fmaxx, float(res - 1))))
+            maxy = int(np.ceil(min(fmaxy, float(res - 1))))
             if minx > maxx or miny > maxy:
                 continue
             d0 = b - a

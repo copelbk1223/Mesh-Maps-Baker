@@ -36,6 +36,11 @@ class MeshBakerSettings(bpy.types.PropertyGroup):
         name="Match By Name (_low/_high)", default=False,
         description="Only accept ray hits on high meshes whose base name matches the low poly (suffixes _low/_high, _lp/_hp)",
     )
+    proj_ignore_backface: BoolProperty(
+        name="Ignore Backfaces", default=True,
+        description="Projection rays ignore hits on backfacing high poly surfaces "
+                    "(Substance default). Prevents inside-out shells from polluting the bake",
+    )
 
     # ------------------------------------------------------- projection
     frontal_pct: FloatProperty(
@@ -97,14 +102,14 @@ class MeshBakerSettings(bpy.types.PropertyGroup):
     use_ao: BoolProperty(name="Ambient Occlusion", default=True)
     ao_rays: IntProperty(name="Rays", default=64, min=4, max=1024)
     ao_distance_pct: FloatProperty(
-        name="Distance", default=0.0, min=0.0, max=200.0, subtype='PERCENTAGE',
+        name="Distance", default=10.0, min=0.0, max=200.0, subtype='PERCENTAGE',
         description="Max occlusion distance as % of bounding box diagonal. 0 = unlimited",
     )
     ao_spread: FloatProperty(name="Spread Angle", default=180.0, min=1.0, max=180.0)
     ao_attenuation: EnumProperty(
         name="Attenuation",
         items=[('NONE', "None", ""), ('LINEAR', "Linear", ""), ('SMOOTH', "Smooth", "")],
-        default='NONE',
+        default='LINEAR',
     )
     ao_ignore_backface: BoolProperty(name="Ignore Backfaces", default=True)
     ao_self: EnumProperty(
@@ -120,13 +125,26 @@ class MeshBakerSettings(bpy.types.PropertyGroup):
     use_thickness: BoolProperty(name="Thickness", default=True)
     th_rays: IntProperty(name="Rays", default=64, min=4, max=1024)
     th_distance_pct: FloatProperty(
-        name="Distance", default=25.0, min=0.1, max=200.0, subtype='PERCENTAGE',
+        name="Distance", default=10.0, min=0.1, max=200.0, subtype='PERCENTAGE',
         description="Normalization distance as % of bounding box diagonal",
     )
     th_spread: FloatProperty(name="Spread Angle", default=180.0, min=1.0, max=180.0)
 
     use_curvature: BoolProperty(name="Curvature", default=True)
+    curv_source: EnumProperty(
+        name="Source",
+        items=[
+            ('AUTO', "Auto", "From normal map in High to Low, from mesh in Single Object"),
+            ('NORMALMAP', "From Normal Map", "Derived from the baked tangent normal map (Substance classic). Needs high poly detail"),
+            ('MESH', "From Mesh", "Derived from the surface geometry itself. Works in Single Object mode"),
+        ],
+        default='AUTO',
+    )
     curv_intensity: FloatProperty(name="Intensity", default=1.0, min=0.01, max=20.0)
+    curv_auto_tonemap: BoolProperty(
+        name="Auto Tonemap", default=True,
+        description="Normalize curvature contrast automatically from the values "
+                    "found during the bake (like Substance's Curvature from Mesh)")
     curv_smooth: IntProperty(
         name="Smooth", default=0, min=0, max=8,
         description="Blur iterations applied to the normal data before deriving curvature",
@@ -134,6 +152,28 @@ class MeshBakerSettings(bpy.types.PropertyGroup):
     curv_invert: BoolProperty(name="Invert", default=False)
 
     use_position: BoolProperty(name="Position", default=False)
+    pos_mode: EnumProperty(
+        name="Axis",
+        items=[('ALL', "All Axes (RGB)", ""), ('X', "X Only", ""),
+               ('Y', "Y Only", ""), ('Z', "Z Only", "")],
+        default='ALL',
+    )
+    pos_normalization: EnumProperty(
+        name="Normalization",
+        items=[('BBOX', "Bounding Box", "Normalize each axis by the bounding box"),
+               ('BSPHERE', "Bounding Sphere", "Normalize all axes uniformly by the bounding sphere")],
+        default='BBOX',
+    )
+    use_height: BoolProperty(
+        name="Height", default=False,
+        description="Signed distance between the high and low poly surfaces "
+                    "(0.5 = on-surface). High to Low mode only",
+    )
+    height_scale_pct: FloatProperty(
+        name="Scale", default=0.0, min=0.0, max=100.0, subtype='PERCENTAGE',
+        description="Manual normalization range as % of the bounding box diagonal. "
+                    "0 = automatic (fit to the values found in the bake)",
+    )
     use_matid: BoolProperty(name="Material ID", default=True)
     id_source: EnumProperty(
         name="Color Source",
