@@ -1,0 +1,65 @@
+name: Build addon
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.plat }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            plat: windows-x64
+          - os: ubuntu-22.04
+            plat: linux-x64
+          - os: macos-14
+            plat: macos-arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      # Blender 4.1 - 4.5 all bundle Python 3.11, so the binary must be
+      # compiled against Python 3.11.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Configure (CMake)
+        run: >
+          cmake -S cpp -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DPython_ROOT_DIR="${{ env.pythonLocation }}"
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Package addon
+        run: python scripts/package.py --build-dir build --platform ${{ matrix.plat }} --out dist
+
+      # Also produce a pure-Python (no binary, slow fallback) zip once
+      - name: Package pure-Python fallback
+        if: matrix.plat == 'linux-x64'
+        run: python scripts/package.py --pure --out dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mesh-baker-${{ matrix.plat }}
+          path: dist/*.zip
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip
