@@ -3,6 +3,7 @@
 A Blender addon that bakes mesh maps the way Substance Painter / Marmoset Toolbag
 do it — with a dedicated texel-space raycast baker, not Blender's render engine.
 
+
 **Maps:** Tangent Normal (MikkTSpace, OpenGL/DirectX), Ambient Occlusion,
 Curvature (derived from the normal map, Substance-style), Thickness,
 Position, World Space Normal, Material/Mesh ID.
